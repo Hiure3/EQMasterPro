@@ -87,16 +87,23 @@ jobs:
           if (Test-Path $dst) { throw "VST3 still present after uninstall" }
 
       - name: Write BUILD-REPORT
+      - name: Write BUILD-REPORT
         if: always()
         shell: pwsh
         run: |
-          function R($o) { switch ($o) { 'success' { 'PASS' } 'failure' { 'FAIL' } default { 'NOT VERIFIED' } } }
+          function Get-Result($o) { switch ($o) { 'success' { 'PASS' } 'failure' { 'FAIL' } default { 'NOT VERIFIED' } } }
           New-Item -ItemType Directory -Force DIST | Out-Null
           $inst = Get-Item DIST/EQMasterPro-Setup-x64.exe -ErrorAction SilentlyContinue
           $size = if ($inst) { "{0:N0} bytes" -f $inst.Length } else { "n/a" }
           $os = (Get-CimInstance Win32_OperatingSystem).Caption
           $juce = (Select-String -Path CMakeLists.txt -Pattern 'GIT_TAG\s+(\S+)').Matches[0].Groups[1].Value
-          $dsp = R '${{ steps.tests.outcome }}'
+          $dsp = Get-Result '${{ steps.tests.outcome }}'
+          $bld = Get-Result '${{ steps.build.outcome }}'
+          $ptl = Get-Result '${{ steps.plugintests.outcome }}'
+          $vst = Get-Result '${{ steps.vst3.outcome }}'
+          $plv = Get-Result '${{ steps.pluginval.outcome }}'
+          $ins = Get-Result '${{ steps.installer.outcome }}'
+          $itest = Get-Result '${{ steps.installtest.outcome }}'
           @"
           EQ MASTER PRO
           Version: $env:VERSION
@@ -108,7 +115,7 @@ jobs:
           VST3: EQMasterPro.vst3
           Installer size: $size
 
-          Build:                  $(R '${{ steps.build.outcome }}')
+          Build:                  $bld
           DSP unit tests (224 checks): $dsp
             EQ (9 filter types, 24 bands, M/S): $dsp
             FFT/spectrum grid:    NOT VERIFIED (GUI analyser is not covered by automated tests)
@@ -119,11 +126,11 @@ jobs:
             EQ MATCH:             $dsp
             PRESETS (19):         $dsp
             STABILITY (NaN/Inf):  $dsp
-          Plugin-level tests (real processor, 69 checks): $(R '${{ steps.plugintests.outcome }}')
-          VST3 binary present:    $(R '${{ steps.vst3.outcome }}')
-          pluginval (strictness 5, no GUI tests): $(R '${{ steps.pluginval.outcome }}')
-          INSTALLER built:        $(R '${{ steps.installer.outcome }}')
-          Silent install + uninstall test: $(R '${{ steps.installtest.outcome }}')
+          Plugin-level tests (real processor, 69 checks): $ptl
+          VST3 binary present:    $vst
+          pluginval (strictness 5, no GUI tests): $plv
+          INSTALLER built:        $ins
+          Silent install + uninstall test: $itest
 
           NOT VERIFIED (needs a human): loading in a real DAW, graphical interface look/behaviour,
           audio listening test, Windows 10 (CI ran on the runner OS above), SmartScreen behaviour.
