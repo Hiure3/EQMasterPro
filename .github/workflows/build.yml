@@ -1,0 +1,148 @@
+name: Build EQ Master Pro
+
+on:
+  push:
+    branches: [main, master]
+    tags: ['v*']
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  windows:
+    runs-on: windows-2022
+    env:
+      VERSION: 1.0.0
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Inno Setup
+        shell: pwsh
+        run: choco install innosetup -y --no-progress
+
+      - name: DSP unit tests
+        id: tests
+        shell: pwsh
+        run: |
+          cmake -S . -B build-tests -DEQM_BUILD_PLUGIN=OFF -DEQM_BUILD_TESTS=ON
+          cmake --build build-tests --config Release
+          ctest --test-dir build-tests -C Release --output-on-failure | Tee-Object -FilePath test-output.txt
+
+      - name: Configure plugin
+        id: configure
+        shell: pwsh
+        run: cmake -S . -B build -G "Visual Studio 17 2022" -A x64 -DEQM_BUILD_TESTS=OFF
+
+      - name: Build VST3 (Release x64)
+        id: build
+        shell: pwsh
+        run: cmake --build build --config Release --parallel
+
+      - name: Plugin-level tests
+        id: plugintests
+        shell: pwsh
+        run: ctest --test-dir build -C Release --output-on-failure
+
+      - name: Check VST3 binary
+        id: vst3
+        shell: pwsh
+        run: |
+          $bin = "build/EQMasterPro_artefacts/Release/VST3/EQMasterPro.vst3/Contents/x86_64-win/EQMasterPro.vst3"
+          if (-not (Test-Path $bin)) { throw "VST3 binary not found: $bin" }
+          Get-Item $bin | Format-List FullName, Length
+
+      - name: Validate VST3 with pluginval
+        id: pluginval
+        continue-on-error: true
+        shell: pwsh
+        run: |
+          Invoke-WebRequest -Uri "https://github.com/Tracktion/pluginval/releases/latest/download/pluginval_Windows.zip" -OutFile pluginval.zip
+          Expand-Archive pluginval.zip -DestinationPath pluginval
+          ./pluginval/pluginval.exe --strictness-level 5 --validate-in-process --skip-gui-tests --output-dir pluginval-logs "build/EQMasterPro_artefacts/Release/VST3/EQMasterPro.vst3"
+
+      - name: Build installer
+        id: installer
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force DIST | Out-Null
+          & "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe" "/DBuildDir=..\build" "/DMyAppVersion=$env:VERSION" installer\EQMasterPro.iss
+          if (-not (Test-Path DIST/EQMasterPro-Setup-x64.exe)) { throw "Installer not produced" }
+
+      - name: Silent install test
+        id: installtest
+        continue-on-error: true
+        shell: pwsh
+        run: |
+          $p = Start-Process -FilePath DIST/EQMasterPro-Setup-x64.exe -ArgumentList "/VERYSILENT","/SUPPRESSMSGBOXES","/NORESTART","/LOG=install.log" -Wait -PassThru
+          if ($p.ExitCode -ne 0) { throw "installer exit code $($p.ExitCode)" }
+          $dst = "$env:CommonProgramFiles\VST3\EQMasterPro.vst3\Contents\x86_64-win\EQMasterPro.vst3"
+          if (-not (Test-Path $dst)) { throw "VST3 not installed at $dst" }
+          Get-Item $dst | Format-List FullName, Length
+          $u = Get-ChildItem "${env:ProgramFiles}\EQ Master Pro\unins*.exe" | Select-Object -First 1
+          if (-not $u) { throw "uninstaller missing" }
+          $p2 = Start-Process -FilePath $u.FullName -ArgumentList "/VERYSILENT","/NORESTART" -Wait -PassThru
+          if ($p2.ExitCode -ne 0) { throw "uninstall exit code $($p2.ExitCode)" }
+          if (Test-Path $dst) { throw "VST3 still present after uninstall" }
+
+      - name: Write BUILD-REPORT
+        if: always()
+        shell: pwsh
+        run: |
+          function R($o) { switch ($o) { 'success' { 'PASS' } 'failure' { 'FAIL' } default { 'NOT VERIFIED' } } }
+          New-Item -ItemType Directory -Force DIST | Out-Null
+          $inst = Get-Item DIST/EQMasterPro-Setup-x64.exe -ErrorAction SilentlyContinue
+          $size = if ($inst) { "{0:N0} bytes" -f $inst.Length } else { "n/a" }
+          $os = (Get-CimInstance Win32_OperatingSystem).Caption
+          $juce = (Select-String -Path CMakeLists.txt -Pattern 'GIT_TAG\s+(\S+)').Matches[0].Groups[1].Value
+          $dsp = R '${{ steps.tests.outcome }}'
+          @"
+          EQ MASTER PRO
+          Version: $env:VERSION
+          Build: ${{ github.run_number }} (commit ${{ github.sha }})
+          Windows: $os (CI runner)
+          Architecture: x64
+          Compiler: MSVC (Visual Studio 2022), static runtime
+          JUCE: $juce
+          VST3: EQMasterPro.vst3
+          Installer size: $size
+
+          Build:                  $(R '${{ steps.build.outcome }}')
+          DSP unit tests (224 checks): $dsp
+            EQ (9 filter types, 24 bands, M/S): $dsp
+            FFT/spectrum grid:    NOT VERIFIED (GUI analyser is not covered by automated tests)
+            LUFS (M/S/I/LRA):     $dsp
+            TRUE PEAK:            $dsp
+            DYNAMIC EQ:           $dsp
+            AUTO EQ:              $dsp
+            EQ MATCH:             $dsp
+            PRESETS (19):         $dsp
+            STABILITY (NaN/Inf):  $dsp
+          Plugin-level tests (real processor, 69 checks): $(R '${{ steps.plugintests.outcome }}')
+          VST3 binary present:    $(R '${{ steps.vst3.outcome }}')
+          pluginval (strictness 5, no GUI tests): $(R '${{ steps.pluginval.outcome }}')
+          INSTALLER built:        $(R '${{ steps.installer.outcome }}')
+          Silent install + uninstall test: $(R '${{ steps.installtest.outcome }}')
+
+          NOT VERIFIED (needs a human): loading in a real DAW, graphical interface look/behaviour,
+          audio listening test, Windows 10 (CI ran on the runner OS above), SmartScreen behaviour.
+          "@ | Set-Content -Path DIST/BUILD-REPORT.txt -Encoding utf8
+          Get-Content DIST/BUILD-REPORT.txt
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: EQMasterPro-DIST
+          path: |
+            DIST/EQMasterPro-Setup-x64.exe
+            DIST/BUILD-REPORT.txt
+            pluginval-logs/**
+
+      - name: Publish release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            DIST/EQMasterPro-Setup-x64.exe
+            DIST/BUILD-REPORT.txt
