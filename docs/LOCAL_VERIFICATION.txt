@@ -1,0 +1,9 @@
+Verification performed while writing this project (Linux sandbox, NOT Windows):
+  PASS  DSP unit tests (g++ 13, C++17): 224 checks, 0 failures
+  PASS  Plugin compiled as VST3 with JUCE 8.0.15 on Linux (Release) - no compiler errors
+  PASS  JUCE VST3 manifest helper loaded the plugin factory and wrote moduleinfo.json
+  PASS  Plugin-level tests with the real AudioProcessor: 69 checks, 0 failures
+NOT VERIFIED here (done by the GitHub Actions workflow, or needs a human):
+  - MSVC / Windows build, Inno Setup installer, silent install/uninstall, pluginval  -> workflow
+  - Opening the editor (graphical interface) - never rendered or looked at by the author
+  - Loading in a real DAW, listening tests, Windows 10
